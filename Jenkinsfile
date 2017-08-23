@@ -6,9 +6,14 @@ properties(
                         [
                                 string(description: 'CI Message that triggered the pipeline', name: 'CI_MESSAGE'),
                                 string(defaultValue: 'f26', description: 'Fedora target branch', name: 'TARGET_BRANCH'),
+                                string(defaultValue: 'http://artifacts.ci.centos.org/artifacts/fedora-atomic', description: 'URL for rsync content', name: 'HTTP_BASE'),
+                                string(defaultValue: 'fedora-atomic', description: 'RSync User', name: 'RSYNC_USER'),
+                                string(defaultValue: 'artifacts.ci.centos.org', description: 'RSync Server', name: 'RSYNC_SERVER'),
+                                string(defaultValue: 'fedora-atomic', description: 'RSync Dir', name: 'RSYNC_DIR'),
                                 string(defaultValue: 'ci-pipeline', description: 'Main project repo', name: 'PROJECT_REPO'),
                                 string(defaultValue: 'org.centos.stage', description: 'Main topic to publish on', name: 'MAIN_TOPIC'),
                                 string(defaultValue: 'fedora-fedmsg', description: 'Main provider to send messages on', name: 'MSG_PROVIDER'),
+                                string(defaultValue: 'bpeck/jenkins-continuous-infra.apps.ci.centos.org@FEDORAPROJECT.ORG', description: 'Principal for authenticating with fedora build system', name: 'FEDORA_PRINCIPAL'),
                                 booleanParam(defaultValue: false, description: 'Force generation of the image', name: 'GENERATE_IMAGE'),
                         ]
                 ),
@@ -37,16 +42,18 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
                     deleteDir()
                     current_stage = "ci-pipeline-rpmbuild"
                     stage(current_stage) {
-                        env.basearch = "x86_64"
-
-                        // Set default main topic for messaging
-                        if ((env.MAIN_TOPIC == null) || ("${env.MAIN_TOPIC}" == "")) {
-                            env.MAIN_TOPIC = "org.centos.prod"
-                        }
-                        if ((env.MSG_PROVIDER == null) || ("${env.MSG_PROVIDER}" == "")) {
-                            env.MSG_PROVIDER = "fedora-fedmsg"
-                        }
-
+                        env.MAIN_TOPIC = env.MAIN_TOPIC ?: 'org.centos.prod'
+                        env.MSG_PROVIDER = env.MSG_PROVIDER ?: 'fedora-fedmsg'
+                        env.HTTP_BASE = env.HTTP_BASE ?: 'http://artifacts.ci.centos.org/artifacts/fedora-atomic'
+                        env.RSYNC_USER = env.RSYNC_USER ?: 'fedora-atomic'
+                        env.RSYNC_SERVER = env.RSYNC_SERVER ?: 'artifacts.ci.centos.org'
+                        env.RSYNC_DIR = env.RSYNC_DIR ?: 'fedora-atomic'
+                        env.basearch = env.basearch ?: 'x86_64'
+                        env.OSTREE_BRANCH = env.OSTREE_BRANCH ?: ''
+                        env.commit = env.commit ?: ''
+                        env.image2boot = env.image2boot ?: ''
+                        env.image_name = env.image_name ?: ''
+                        env.FEDORA_PRINCIPAL = env.FEDORA_PRINCIPAL ?: 'bpeck/jenkins-continuous-infra.apps.ci.centos.org@FEDORAPROJECT.ORG'
 
                         // SCM
                         dir('ci-pipeline') {
@@ -75,21 +82,21 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
 
                         // Parse the ${CI_MESSAGE}
                         sh '''
-                        #!/bin/bash
-                        set -xuo pipefail
+                #!/bin/bash
+                set -xuo pipefail
 
-                        chmod +x ${WORKSPACE}/parse_fedmsg.py
+                chmod +x ${WORKSPACE}/parse_fedmsg.py
 
-                        # Write fedmsg fields to a file to inject them
-                        if [ -n "${CI_MESSAGE}" ]; then
-                            echo ${CI_MESSAGE} | ${WORKSPACE}/parse_fedmsg.py > fedmsg_fields.txt
-                            sed -i '/^\\\\s*$/d' ${WORKSPACE}/fedmsg_fields.txt
-                            sed -i '/`/g' ${WORKSPACE}/fedmsg_fields.txt
-                            sed -i '/^fed/!d' ${WORKSPACE}/fedmsg_fields.txt
-                            grep fed ${WORKSPACE}/fedmsg_fields.txt > ${WORKSPACE}/fedmsg_fields.txt.tmp
-                            mv ${WORKSPACE}/fedmsg_fields.txt.tmp ${WORKSPACE}/fedmsg_fields.txt
-                        fi
-                    '''
+                # Write fedmsg fields to a file to inject them
+                if [ -n "${CI_MESSAGE}" ]; then
+                    echo ${CI_MESSAGE} | ${WORKSPACE}/parse_fedmsg.py > fedmsg_fields.txt
+                    sed -i '/^\\\\s*$/d' ${WORKSPACE}/fedmsg_fields.txt
+                    sed -i '/`/g' ${WORKSPACE}/fedmsg_fields.txt
+                    sed -i '/^fed/!d' ${WORKSPACE}/fedmsg_fields.txt
+                    grep fed ${WORKSPACE}/fedmsg_fields.txt > ${WORKSPACE}/fedmsg_fields.txt.tmp
+                    mv ${WORKSPACE}/fedmsg_fields.txt.tmp ${WORKSPACE}/fedmsg_fields.txt
+                fi
+            '''
 
                         // Load fedmsg fields as environment variables
                         def fedmsg_fields = "${env.WORKSPACE}/fedmsg_fields.txt"
@@ -99,18 +106,18 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
 
                         // Add Branch and Message Topic to properties and inject
                         sh '''
-                        set +e
-                        branch=${fed_branch}
-                        if [ "${branch}" = "master" ]; then
-                          branch="rawhide"
-                        fi
-                        
-                        
-                        # Save the bramch in job.properties
-                        echo "branch=${branch}" >> ${WORKSPACE}/job.properties
-                        echo "topic=${MAIN_TOPIC}.ci.pipeline.package.queued" >> ${WORKSPACE}/job.properties
-                        exit
-                    '''
+                set +e
+                branch=${fed_branch}
+                if [ "${branch}" = "master" ]; then
+                  branch="rawhide"
+                fi
+                
+                
+                # Save the bramch in job.properties
+                echo "branch=${branch}" >> ${WORKSPACE}/job.properties
+                echo "topic=${MAIN_TOPIC}.ci.pipeline.package.queued" >> ${WORKSPACE}/job.properties
+                exit
+            '''
                         def job_props = "${env.WORKSPACE}/job.properties"
                         def job_props_groovy = "${env.WORKSPACE}/job.properties.groovy"
                         convertProps(job_props, job_props_groovy)
@@ -164,6 +171,11 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
                         // Rsync Data
                         writeFile file: "${env.ORIGIN_WORKSPACE}/task.env",
                                 text: "export JENKINS_JOB_NAME=\"${JOB_NAME}-${current_stage}\"\n" +
+                                        "export HTTP_BASE=\"${HTTP_BASE}\"\n" +
+                                        "export RSYNC_USER=\"${RSYNC_USER}\"\n" +
+                                        "export RSYNC_SERVER=\"${RSYNC_SERVER}\"\n" +
+                                        "export RSYNC_DIR=\"${RSYNC_DIR}\"\n" +
+                                        "export FEDORA_PRINCIPAL=\"${FEDORA_PRINCIPAL}\"\n" +
                                         "export JENKINS_BUILD_TAG=\"${BUILD_TAG}-${current_stage}\"\n" +
                                         "export OSTREE_BRANCH=\"${OSTREE_BRANCH}\"\n" +
                                         "export fed_repo=\"${fed_repo}\"\n" +
@@ -190,6 +202,8 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
                                 "build_id=${BUILD_ID}\n" +
                                 "branch=${branch}\n" +
                                 "package_url=${package_url}\n" +
+                                "original_spec_nvr=${original_spec_nvr}\n" +
+                                "nvr=${nvr}\n" +
                                 "ref=fedora/${branch}/${basearch}/atomic-host\n" +
                                 "rev=${fed_rev}\n" +
                                 "repo=${fed_repo}\n" +
@@ -218,9 +232,11 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
                         messageProperties = "topic=${topic}\n" +
                                 "build_url=${BUILD_URL}\n" +
                                 "build_id=${BUILD_ID}\n" +
-                                "compose_url=http://artifacts.ci.centos.org/artifacts/fedora-atomic/${branch}/ostree\n" +
+                                "compose_url=${HTTP_BASE}/${branch}/ostree\n" +
                                 "compose_rev=''\n" +
                                 "branch=${branch}\n" +
+                                "original_spec_nvr=${original_spec_nvr}\n" +
+                                "nvr=${nvr}\n" +
                                 "ref=fedora/${branch}/${basearch}/atomic-host\n" +
                                 "rev=${fed_rev}\n" +
                                 "repo=${fed_repo}\n" +
@@ -254,6 +270,11 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
                         // Rsync Data
                         writeFile file: "${env.ORIGIN_WORKSPACE}/task.env",
                                 text: "export branch=\"${branch}\"\n" +
+                                        "export HTTP_BASE=\"${HTTP_BASE}\"\n" +
+                                        "export RSYNC_USER=\"${RSYNC_USER}\"\n" +
+                                        "export RSYNC_SERVER=\"${RSYNC_SERVER}\"\n" +
+                                        "export RSYNC_DIR=\"${RSYNC_DIR}\"\n" +
+                                        "export FEDORA_PRINCIPAL=\"${FEDORA_PRINCIPAL}\"\n" +
                                         "export JENKINS_JOB_NAME=\"${JOB_NAME}-${current_stage}\"\n" +
                                         "export JENKINS_BUILD_TAG=\"${BUILD_TAG}-${current_stage}\"\n" +
                                         "export OSTREE_BRANCH=\"${OSTREE_BRANCH}\"\n"
@@ -277,9 +298,11 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
                         messageProperties = "topic=${topic}\n" +
                                 "build_url=${BUILD_URL}\n" +
                                 "build_id=${BUILD_ID}\n" +
-                                "compose_url=http://artifacts.ci.centos.org/artifacts/fedora-atomic/${branch}/ostree\n" +
+                                "compose_url=${HTTP_BASE}/${branch}/ostree\n" +
                                 "compose_rev=${commit}\n" +
                                 "branch=${branch}\n" +
+                                "original_spec_nvr=${original_spec_nvr}\n" +
+                                "nvr=${nvr}\n" +
                                 "ref=fedora/${branch}/${basearch}/atomic-host\n" +
                                 "rev=${fed_rev}\n" +
                                 "repo=${fed_repo}\n" +
@@ -310,9 +333,11 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
                                     "image_url=''\n" +
                                     "image_name=''\n" +
                                     "type=qcow2\n" +
-                                    "compose_url=http://artifacts.ci.centos.org/artifacts/fedora-atomic/${branch}/ostree\n" +
+                                    "compose_url=${HTTP_BASE}/${branch}/ostree\n" +
                                     "compose_rev=${commit}\n" +
                                     "branch=${branch}\n" +
+                                    "original_spec_nvr=${original_spec_nvr}\n" +
+                                    "nvr=${nvr}\n" +
                                     "ref=fedora/${branch}/${basearch}/atomic-host\n" +
                                     "rev=${fed_rev}\n" +
                                     "repo=${fed_repo}\n" +
@@ -346,6 +371,11 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
                             // Rsync Data
                             writeFile file: "${env.ORIGIN_WORKSPACE}/task.env",
                                     text: "export branch=\"${branch}\"\n" +
+                                            "export HTTP_BASE=\"${HTTP_BASE}\"\n" +
+                                            "export RSYNC_USER=\"${RSYNC_USER}\"\n" +
+                                            "export RSYNC_SERVER=\"${RSYNC_SERVER}\"\n" +
+                                            "export RSYNC_DIR=\"${RSYNC_DIR}\"\n" +
+                                            "export FEDORA_PRINCIPAL=\"${FEDORA_PRINCIPAL}\"\n" +
                                             "export JENKINS_JOB_NAME=\"${JOB_NAME}-${current_stage}\"\n" +
                                             "export JENKINS_BUILD_TAG=\"${BUILD_TAG}-${current_stage}\"\n" +
                                             "export OSTREE_BRANCH=\"${OSTREE_BRANCH}\"\n"
@@ -372,9 +402,11 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
                                     "image_url=${image2boot}\n" +
                                     "image_name=${image_name}\n" +
                                     "type=qcow2\n" +
-                                    "compose_url=http://artifacts.ci.centos.org/artifacts/fedora-atomic/${branch}/ostree\n" +
+                                    "compose_url=${HTTP_BASE}/${branch}/ostree\n" +
                                     "compose_rev=${commit}\n" +
                                     "branch=${branch}\n" +
+                                    "original_spec_nvr=${original_spec_nvr}\n" +
+                                    "nvr=${nvr}\n" +
                                     "ref=fedora/${branch}/${basearch}/atomic-host\n" +
                                     "rev=${fed_rev}\n" +
                                     "repo=${fed_repo}\n" +
@@ -405,9 +437,11 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
                                     "image_url=${image2boot}\n" +
                                     "image_name=${image_name}\n" +
                                     "type=qcow2\n" +
-                                    "compose_url=http://artifacts.ci.centos.org/artifacts/fedora-atomic/${branch}/ostree\n" +
+                                    "compose_url=${HTTP_BASE}/${branch}/ostree\n" +
                                     "compose_rev=${commit}\n" +
                                     "branch=${branch}\n" +
+                                    "original_spec_nvr=${original_spec_nvr}\n" +
+                                    "nvr=${nvr}\n" +
                                     "ref=fedora/${branch}/${basearch}/atomic-host\n" +
                                     "rev=${fed_rev}\n" +
                                     "repo=${fed_repo}\n" +
@@ -441,6 +475,11 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
                             // Rsync Data
                             writeFile file: "${env.ORIGIN_WORKSPACE}/task.env",
                                     text: "export branch=\"${branch}\"\n" +
+                                            "export HTTP_BASE=\"${HTTP_BASE}\"\n" +
+                                            "export RSYNC_USER=\"${RSYNC_USER}\"\n" +
+                                            "export RSYNC_SERVER=\"${RSYNC_SERVER}\"\n" +
+                                            "export RSYNC_DIR=\"${RSYNC_DIR}\"\n" +
+                                            "export FEDORA_PRINCIPAL=\"${FEDORA_PRINCIPAL}\"\n" +
                                             "export JENKINS_JOB_NAME=\"${JOB_NAME}-${current_stage}\"\n" +
                                             "export JENKINS_BUILD_TAG=\"${BUILD_TAG}-${current_stage}\"\n" +
                                             "export OSTREE_BRANCH=\"${OSTREE_BRANCH}\"\n" +
@@ -463,9 +502,11 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
                                     "image_url=${image2boot}\n" +
                                     "image_name=${image_name}\n" +
                                     "type=qcow2\n" +
-                                    "compose_url=http://artifacts.ci.centos.org/artifacts/fedora-atomic/${branch}/ostree\n" +
+                                    "compose_url=${HTTP_BASE}/${branch}/ostree\n" +
                                     "compose_rev=${commit}\n" +
                                     "branch=${branch}\n" +
+                                    "original_spec_nvr=${original_spec_nvr}\n" +
+                                    "nvr=${nvr}\n" +
                                     "ref=fedora/${branch}/${basearch}/atomic-host\n" +
                                     "rev=${fed_rev}\n" +
                                     "repo=${fed_repo}\n" +
@@ -517,6 +558,11 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
                         // Rsync Data
                         writeFile file: "${env.ORIGIN_WORKSPACE}/task.env",
                                 text: "export branch=\"${branch}\"\n" +
+                                        "export HTTP_BASE=\"${HTTP_BASE}\"\n" +
+                                        "export RSYNC_USER=\"${RSYNC_USER}\"\n" +
+                                        "export RSYNC_SERVER=\"${RSYNC_SERVER}\"\n" +
+                                        "export RSYNC_DIR=\"${RSYNC_DIR}\"\n" +
+                                        "export FEDORA_PRINCIPAL=\"${FEDORA_PRINCIPAL}\"\n" +
                                         "export fed_repo=\"${fed_repo}\"\n" +
                                         "export image2boot=\"${image2boot}\"\n" +
                                         "export commit=\"${commit}\"\n" +
@@ -545,9 +591,11 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
                         messageProperties = "topic=${topic}\n" +
                                 "build_url=${BUILD_URL}\n" +
                                 "build_id=${BUILD_ID}\n" +
-                                "compose_url=http://artifacts.ci.centos.org/artifacts/fedora-atomic/${branch}/ostree\n" +
+                                "compose_url=${HTTP_BASE}/${branch}/ostree\n" +
                                 "compose_rev=${commit}\n" +
                                 "branch=${branch}\n" +
+                                "original_spec_nvr=${original_spec_nvr}\n" +
+                                "nvr=${nvr}\n" +
                                 "ref=fedora/${branch}/${basearch}/atomic-host\n" +
                                 "rev=${fed_rev}\n" +
                                 "repo=${fed_repo}\n" +
@@ -569,9 +617,11 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
                         messageProperties = "topic=${topic}\n" +
                                 "build_url=${BUILD_URL}\n" +
                                 "build_id=${BUILD_ID}\n" +
-                                "compose_url=http://artifacts.ci.centos.org/artifacts/fedora-atomic/${branch}/ostree\n" +
+                                "compose_url=${HTTP_BASE}/${branch}/ostree\n" +
                                 "compose_rev=${commit}\n" +
                                 "branch=${branch}\n" +
+                                "original_spec_nvr=${original_spec_nvr}\n" +
+                                "nvr=${nvr}\n" +
                                 "ref=fedora/${branch}/${basearch}/atomic-host\n" +
                                 "rev=${fed_rev}\n" +
                                 "repo=${fed_repo}\n" +
@@ -616,9 +666,11 @@ podTemplate(name: 'fedora-atomic-inline', label: 'fedora-atomic-inline', cloud: 
                         messageProperties = "topic=${topic}\n" +
                                 "build_url=${BUILD_URL}\n" +
                                 "build_id=${BUILD_ID}\n" +
-                                "compose_url=http://artifacts.ci.centos.org/artifacts/fedora-atomic/${branch}/ostree\n" +
+                                "compose_url=${HTTP_BASE}/${branch}/ostree\n" +
                                 "compose_rev=${commit}\n" +
                                 "branch=${branch}\n" +
+                                "original_spec_nvr=${original_spec_nvr}\n" +
+                                "nvr=${nvr}\n" +
                                 "ref=fedora/${branch}/${basearch}/atomic-host\n" +
                                 "rev=${fed_rev}\n" +
                                 "repo=${fed_repo}\n" +
@@ -704,7 +756,7 @@ def setupStage(stage) {
             cp ${FEDORA_ATOMIC_PUB_KEY} ~/.ssh/id_rsa.pub
             chmod 600 ~/.ssh/id_rsa
             chmod 644 ~/.ssh/id_rsa.pub
-            
+
             # Keep compatibility with earlier cciskel-duffy
             if test -f ${ORIGIN_WORKSPACE}/inventory.${ORIGIN_BUILD_TAG}; then
                 ln -fs ${ORIGIN_WORKSPACE}/inventory.${ORIGIN_BUILD_TAG} ${WORKSPACE}/inventory
@@ -723,7 +775,7 @@ def setupStage(stage) {
 def rsyncResults(stage) {
     echo "Currently in stage: ${stage} in rsyncResults"
 
-    withCredentials([file(credentialsId: 'duffy-key', variable: 'DUFFY_KEY')]) {
+    withCredentials([file(credentialsId: 'duffy-key', variable: 'DUFFY_KEY'), file(credentialsId: 'fedora-keytab', variable: 'FEDORA_KEYTAB')]) {
         sh '''
             #!/bin/bash
             set -xeuo pipefail
@@ -731,14 +783,19 @@ def rsyncResults(stage) {
             cp ${DUFFY_KEY} ~/duffy.key
             chmod 600 ~/duffy.key
     
+            cp ${FEDORA_KEYTAB} fedora.keytab
+            chmod 0600 fedora.keytab
+
             source ${ORIGIN_WORKSPACE}/task.env
             (echo -n "export RSYNC_PASSWORD=" && cat ~/duffy.key | cut -c '-13') > rsync-password.sh
             
-            rsync -Hrlptv --stats -e ssh ${ORIGIN_WORKSPACE}/task.env rsync-password.sh builder@${DUFFY_HOST}:${JENKINS_JOB_NAME}
+            rsync -Hrlptv --stats -e ssh ${ORIGIN_WORKSPACE}/task.env rsync-password.sh fedora.keytab builder@${DUFFY_HOST}:${JENKINS_JOB_NAME}
             for repo in ci-pipeline sig-atomic-buildscripts; do
                 rsync -Hrlptv --stats --delete -e ssh ${repo}/ builder@${DUFFY_HOST}:${JENKINS_JOB_NAME}/${repo}
             done
             
+            # Use the following in ${task} to authenticate.
+            #kinit -k -t ${FEDORA_KEYTAB} ${FEDORA_PRINCIPAL}
             build_success=true
             if ! ssh -tt builder@${DUFFY_HOST} "pushd ${JENKINS_JOB_NAME} && . rsync-password.sh && . task.env && ${task}"; then
                 build_success=false
@@ -758,7 +815,7 @@ def checkLastImage(stage) {
     echo "Currently in stage: ${stage} in checkLastImage"
 
     sh '''
-        prev=$( date --date="$( curl -I --silent http://artifacts.ci.centos.org/artifacts/fedora-atomic/${branch}/images/latest-atomic.qcow2 | grep Last-Modified | sed s'/Last-Modified: //' )" +%s )
+        prev=$( date --date="$( curl -I --silent ${HTTP_BASE}/${branch}/images/latest-atomic.qcow2 | grep Last-Modified | sed s'/Last-Modified: //' )" +%s )
         cur=$( date +%s )
         
         elapsed=$((cur - prev))
